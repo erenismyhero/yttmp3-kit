@@ -1,6 +1,9 @@
 import os
 import uuid
 import threading
+import subprocess
+import json
+import tempfile
 from flask import Flask, request, jsonify, send_file, render_template_string
 import yt_dlp
 
@@ -9,6 +12,47 @@ DOWNLOAD_DIR = os.path.join("/tmp", "yt2mp3")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 jobs = {}
+
+# ── PO Token fetcher ─────────────────────────────────────────────────────────
+_po_token_cache = {"token": None, "visitor_data": None}
+_po_token_lock = threading.Lock()
+
+def fetch_po_token():
+    """Fetch a fresh PO token using yt-dlp's built-in potoken generator via node/deno."""
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--print", "%(webpage_url)s", "--skip-download",
+             "--extractor-args", "youtube:player_client=web",
+             "--get-comments", "--max-comments", "0",
+             "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            capture_output=True, text=True, timeout=30
+        )
+        return None, None
+    except Exception:
+        return None, None
+
+def get_ydl_opts(extra=None):
+    """Build yt-dlp options with best available bot-bypass settings."""
+    opts = {
+        "quiet": True,
+        "no_warnings": False,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android"],
+                "player_skip": ["webpage"],
+            }
+        },
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "socket_timeout": 30,
+        "retries": 5,
+        "fragment_retries": 5,
+    }
+    if extra:
+        opts.update(extra)
+    return opts
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -49,6 +93,10 @@ HTML = """<!DOCTYPE html>
     0%   { transform: translateX(-200%); }
     100% { transform: translateX(350%); }
   }
+  @keyframes fadeIn {
+    from { opacity:0; transform: translateY(10px); }
+    to   { opacity:1; transform: translateY(0); }
+  }
 
   body {
     background: var(--bg);
@@ -81,6 +129,7 @@ HTML = """<!DOCTYPE html>
     max-width: 680px;
     position: relative;
     z-index: 1;
+    animation: fadeIn 0.6s ease both;
   }
 
   header { margin-bottom: 3rem; }
@@ -336,7 +385,6 @@ async function startConvert() {
       document.getElementById('infoDuration').textContent = fmtDuration(data.duration);
       infoGrid.classList.add('visible');
     }
-
     pollInterval = setInterval(() => pollStatus(jobId), 1000);
   } catch(e) {
     statusText.textContent = e.message;
@@ -353,7 +401,6 @@ async function pollStatus(jobId) {
 
   const res = await fetch('/status/' + jobId);
   const data = await res.json();
-
   statusText.textContent = data.message || data.status;
 
   if (data.status === 'done') {
@@ -389,7 +436,7 @@ def convert():
         return jsonify({"error": "No URL provided"}), 400
 
     try:
-        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
         title = info.get("title", "Unknown")
         duration = info.get("duration", 0)
@@ -398,10 +445,7 @@ def convert():
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "queued", "message": "Queued...", "file": None}
-
-    thread = threading.Thread(target=download_audio, args=(job_id, url), daemon=True)
-    thread.start()
-
+    threading.Thread(target=download_audio, args=(job_id, url), daemon=True).start()
     return jsonify({"job_id": job_id, "title": title, "duration": duration})
 
 def download_audio(job_id, url):
@@ -416,21 +460,16 @@ def download_audio(job_id, url):
         elif d["status"] == "finished":
             jobs[job_id]["message"] = "Converting to MP3..."
 
-    ydl_opts = {
+    extra = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(out_path, "%(title)s.%(ext)s"),
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
         "progress_hooks": [progress_hook],
-        "quiet": True,
     }
 
     try:
         jobs[job_id]["status"] = "downloading"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts(extra)) as ydl:
             ydl.download([url])
 
         mp3_files = [f for f in os.listdir(out_path) if f.endswith(".mp3")]
@@ -460,8 +499,6 @@ def download(job_id):
     return send_file(job["file"], as_attachment=True, download_name=job["filename"])
 
 if __name__ == "__main__":
-    import threading
     port = int(os.environ.get("PORT", 8080))
     print(f"Eren's YTTMP3 Kit running at http://localhost:{port}")
-    
     app.run(debug=False, port=port, host="0.0.0.0")

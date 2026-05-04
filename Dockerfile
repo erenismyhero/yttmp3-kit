@@ -1,17 +1,21 @@
 FROM python:3.11-slim
 
-# Install ffmpeg and deno (JS runtime for yt-dlp)
-RUN apt-get update && apt-get install -y ffmpeg curl unzip && \
-    curl -fsSL https://deno.land/install.sh | sh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-ENV DENO_INSTALL="/root/.deno"
-ENV PATH="$DENO_INSTALL/bin:$PATH"
+# Install ffmpeg, curl, nodejs (for PO token generation)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    curl \
+    nodejs \
+    npm \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install yt-dlp with extras and PO token plugin
+RUN pip install --no-cache-dir "yt-dlp[default]" && \
+    pip install --no-cache-dir "yt-dlp-get-pot>=0.2.0" 2>/dev/null || true
 
 COPY app.py .
 
